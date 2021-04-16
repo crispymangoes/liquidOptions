@@ -26,6 +26,8 @@ contract optionLiquidityPool is Ownable {
     uint lockedA;
     uint LPoutstanding = 0;
     uint64 maxOptionLedgerSize = 65535;
+    uint public VPT_test;
+    uint public payout_test;
     
     LPtoken LPTOKEN;
     optionFactory OPTIONFACTORY;
@@ -109,13 +111,13 @@ contract optionLiquidityPool is Ownable {
         require(msg.value >= _amount_A, 'Not enough ETH sent');
         require(DAI.transferFrom(msg.sender, address(this), _amount_B), 'transferFrom failed.');
         uint AtoB = 1 / uint(getThePrice());
-        uint TVL = totalB + totalA*AtoB; // Think A is in an 18 decimal format so you dont want to multiply by 18
+        uint TVL = totalB + totalA * (10**18)/uint(getThePrice()); // Think A is in an 18 decimal format so you dont want to multiply by 18
         uint LPtoSender;
         if ( LPTOKEN.totalSupply() == 0 ) {
             LPtoSender = 1 * 10 ** 18;
         }
         else {
-            LPtoSender = LPoutstanding * (_amount_A*AtoB + _amount_B) / TVL;
+            LPtoSender = LPoutstanding * (_amount_A*AtoB + _amount_B) / TVL; //CHANGE LPoutstanding to LPTOKEN.totalSupply()
         }
         
         totalA = totalA + _amount_A;
@@ -125,28 +127,35 @@ contract optionLiquidityPool is Ownable {
     //function LPWithdraw
     // little tricky bc it withdraws all coins if you are in the withdrawal period, but if not then they need to pay a fee and won't get all coins
     // Another thing to note is that since a user could deposit DAI, then withdraw ETH, they don't pay any liquiidity fees, though I think it will be more expensive to do that
-    function LPWithdraw(uint _amount, bool _asset, address payable _address) public updateBlockPeriod {
+    function LPWithdraw(uint _amount, uint8 _asset, address payable _address) public updateBlockPeriod {
         require( msg.sender == _address, "You can only withdraw LPtokens you own");
         //require( block.number >= (periodStart + contractCreationPeriod), "Cannot withdraw during contractCreationPeriod!");
-        uint AtoB = 1 / uint(getThePrice());
-        uint TVL = totalB + totalA*AtoB; // Think A is in an 18 decimal format so you dont want to multiply by 18
+        //uint AtoB = 1 / uint(getThePrice());
+        uint TVL = totalB + totalA * (10**18)/uint(getThePrice()); // Think A is in an 18 decimal format so you dont want to multiply by 18
         uint valuePerToken = TVL / LPTOKEN.totalSupply();
+        VPT_test = valuePerToken;
         LPTOKEN.burnLPtokens(_address, _amount); //dont need to call approve!
         
         //LPoutstanding = LPoutstanding - _amount;
         uint payout;
-        if (_asset) { //user wants payout in ETH DOESN"T SEEM TO WORK HAD A GAS ERROR WHEN _asset WAS TRUE
-            payout = _amount * valuePerToken / AtoB; //not sure if that is the correct way to convert the DAI to ETH
+        if (_asset == 0) { //user wants payout in ETH DOESN"T SEEM TO WORK HAD A GAS ERROR WHEN _asset WAS TRUE
+            uint DAItoETH = uint(getThePrice())/(10**18);
+            payout = (_amount * valuePerToken * uint(getThePrice())) / (10**18); //not sure if that is the correct way to convert the DAI to ETH
+            payout_test = payout;
             //need to update totalA
-            totalA = totalA - _amount; // need to have error checking making sure ratio between A and B is not too extreme
+            totalA = totalA - payout; // need to have error checking making sure ratio between A and B is not too extreme
+            //_address.transfer(payout);
             _address.transfer(payout);
             //(bool success, ) = msg.sender.call{value: payout}("");
             //require(success, "Transfer failed.");
         }
-        else { //user wants payout in DAI WAS ABLE TO RUN BUT TOUGH TO TELL IF IT WORKED SINCE IT TRANSFERRED SUCH A SMALL AMOUNT OF DAI
+        else if (_asset == 100){ //user wants payout in DAI WAS ABLE TO RUN BUT TOUGH TO TELL IF IT WORKED SINCE IT TRANSFERRED SUCH A SMALL AMOUNT OF DAI
             payout = _amount * valuePerToken;
-            totalB = totalB - _amount; // need to have error checking making sure ratio between A and B is not too extreme
+            totalB = totalB - payout; // need to have error checking making sure ratio between A and B is not too extreme
             DAI.transferFrom(address(this), _address, payout);
+        }
+        else if (_asset == 50) {
+            
         }
         
         
