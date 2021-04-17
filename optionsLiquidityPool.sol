@@ -172,7 +172,7 @@ contract optionLiquidityPool is Ownable {
     //function to calculate the re-balancing fee if they withdraw too early
     
     //funciton calculatePremiumView make it a function that just reads the chain and does math on the local node
-    function calculatePremium( uint _amount, uint _strike, bool _asset, uint _ATR, bool _action ) public returns(uint){
+    function calculatePremium( uint _amount, uint _strike, bool _asset, uint _ATR, bool _action ) public view returns(uint){
         uint _expiration = periodStart + contractCreationPeriod;
         uint numberToDivideBy = 1; // Keep track of what you need to divide the final answer by at the end
         
@@ -210,14 +210,14 @@ contract optionLiquidityPool is Ownable {
             delta = (10**3) * _currentPrice/_strike; // 10**18 is used to preserver decimals
             totalPremium = _amount * ( vega * DM * theta * delta);
             numberToDivideBy = numberToDivideBy * 10 ** 3;
-        } //TODO LOOK HERE TO START :)))))))))))
+        }
         
         
         totalPremium = totalPremium/numberToDivideBy;
-        theta_test = theta;
-        delta_test = delta;
-        totalPremium_test = totalPremium;
-        DM_test = DM;
+        //theta_test = theta;
+        //delta_test = delta;
+        //totalPremium_test = totalPremium;
+        //DM_test = DM;
         return totalPremium;
         
     }
@@ -301,7 +301,7 @@ contract optionLiquidityPool is Ownable {
     function exerciseOption( uint token_Id, address payable _address ) public payable {
         require( msg.sender == _address, "You can only exercise contracts you own");
         require( OPTIONFACTORY.ownerOf(token_Id) == msg.sender, "Caller does not own contract");
-        require( optionLedger[token_Id].expiration < block.number, "Contract is expired");
+        require( block.number < optionLedger[token_Id].expiration, "Contract is expired");
         //require to check if option is ITM
         OPTIONFACTORY.burnOption(token_Id);
         uint payment = (optionLedger[token_Id].strike * optionLedger[token_Id].amount) / 10**18;
