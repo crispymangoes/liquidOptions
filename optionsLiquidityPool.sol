@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 
-pragma solidity >=0.7.0 <0.9.0;
+pragma solidity >=0.8.0 <0.9.0;
 
 import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/ERC20.sol";
 import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/IERC20.sol";
@@ -17,17 +17,21 @@ contract optionLiquidityPool is Ownable {
     -liquidity pools
     */
     
-    uint periodStart; // The block when the contract creation starts
-    uint contractCreationPeriod = 208800; // How long you want the contract period to last
-    uint withdrawPeriod = 7200; // How long you want the withdrawPeriodaw period to last
-    uint totalB; //amount of DAI
-    uint totalA; //amount of ETH
-    uint lockedB;
-    uint lockedA;
-    uint LPoutstanding = 0;
+    uint public periodStart; // The block when the contract creation starts
+    uint public contractCreationPeriod = 208800; // How long you want the contract period to last
+    uint public withdrawPeriod = 7200; // How long you want the withdrawPeriodaw period to last
+    uint public totalB; //amount of DAI
+    uint public totalA; //amount of ETH
+    uint public lockedB;
+    uint public lockedA;
     uint64 maxOptionLedgerSize = 65535;
     uint public VPT_test;
     uint public payout_test;
+    uint public theta_test;
+    uint public delta_test;
+    uint public totalPremium_test;
+    uint public DM_test;
+    uint public theGreeks_test;
     
     LPtoken LPTOKEN;
     optionFactory OPTIONFACTORY;
@@ -93,11 +97,11 @@ contract optionLiquidityPool is Ownable {
     
     function getThePrice() public view returns (int) {
         (
-            uint80 roundID, 
+            , 
             int price,
-            uint startedAt,
-            uint timeStamp,
-            uint80 answeredInRound
+            ,
+            ,
+            
         ) = priceFeed.latestRoundData();
         return price;
         /**
@@ -107,26 +111,31 @@ contract optionLiquidityPool is Ownable {
     }
     
     //function LPDeposit
-    function LPDeposit( uint _amount_A, uint _amount_B ) payable external updateBlockPeriod {
-        require(msg.value >= _amount_A, 'Not enough ETH sent');
-        require(DAI.transferFrom(msg.sender, address(this), _amount_B), 'transferFrom failed.');
-        uint AtoB = 1 / uint(getThePrice());
+    //TODO: Remove _amount_A and just use msg.value
+    //TODO: Add restrictions to single asset deposits when asset ratio is worse than 3:2
+    //TODO: Add in LP fee for single asset transactions
+    function LPDeposit( uint _amount_B ) payable external updateBlockPeriod {
+        if (_amount_B > 0){
+            require(DAI.transferFrom(msg.sender, address(this), _amount_B), 'transferFrom failed.');
+        }
         uint TVL = totalB + totalA * (10**18)/uint(getThePrice()); // Think A is in an 18 decimal format so you dont want to multiply by 18
         uint LPtoSender;
         if ( LPTOKEN.totalSupply() == 0 ) {
             LPtoSender = 1 * 10 ** 18;
         }
         else {
-            LPtoSender = LPoutstanding * (_amount_A*AtoB + _amount_B) / TVL; //CHANGE LPoutstanding to LPTOKEN.totalSupply()
+            LPtoSender = LPTOKEN.totalSupply() * (msg.value * (10**18)/uint(getThePrice()) + _amount_B) / TVL;
         }
         
-        totalA = totalA + _amount_A;
+        totalA = totalA + msg.value;
         totalB = totalB + _amount_B;
         LPTOKEN.mintLPtokens(msg.sender, LPtoSender);
     }
     //function LPWithdraw
     // little tricky bc it withdraws all coins if you are in the withdrawal period, but if not then they need to pay a fee and won't get all coins
     // Another thing to note is that since a user could deposit DAI, then withdraw ETH, they don't pay any liquiidity fees, though I think it will be more expensive to do that
+    //TODO: Add restrictions to single asset withdrawals when asset ratio is worse than 3:2
+    //TODO: Add in LP fee for single asset transactions
     function LPWithdraw(uint _amount, uint8 _asset, address payable _address) public updateBlockPeriod {
         require( msg.sender == _address, "You can only withdraw LPtokens you own");
         //require( block.number >= (periodStart + contractCreationPeriod), "Cannot withdraw during contractCreationPeriod!");
@@ -139,7 +148,6 @@ contract optionLiquidityPool is Ownable {
         //LPoutstanding = LPoutstanding - _amount;
         uint payout;
         if (_asset == 0) { //user wants payout in ETH DOESN"T SEEM TO WORK HAD A GAS ERROR WHEN _asset WAS TRUE
-            uint DAItoETH = uint(getThePrice())/(10**18);
             payout = (_amount * valuePerToken * uint(getThePrice())) / (10**18); //not sure if that is the correct way to convert the DAI to ETH
             payout_test = payout;
             //need to update totalA
@@ -164,39 +172,118 @@ contract optionLiquidityPool is Ownable {
     //function to calculate the re-balancing fee if they withdraw too early
     
     //funciton calculatePremiumView make it a function that just reads the chain and does math on the local node
-    function calculatePremiumView( uint _expiration, uint _amount, uint _strike, uint _currentPrice, bool _asset, uint _ATR ) public pure returns(uint){
-        //returns the amount of the underlying it is worth
-        //premium multiplier function should be added to this, eventhough  there will be a dedicated funciton, this is to keep it a view function
-        // intrinsic = (assetPrice - strikePrice)
-        // if ( assetPrice > strikePrice) { premium = (assetPrice - strikePrice) + demandMultiplier * ( ATR * assetPrice/strikePrice * (0.05 ** (1/BLOCKS_TO_EXPIRATION))
-        // else {premium = demandMultiplier * ( ATR * assetPrice/strikePrice * (0.05 ** (1/BLOCKS_TO_EXPIRATION))}
-        //return premium
+    function calculatePremium( uint _amount, uint _strike, bool _asset, uint _ATR, bool _action ) public returns(uint){
+        uint _expiration = periodStart + contractCreationPeriod;
+        uint numberToDivideBy = 1; // Keep track of what you need to divide the final answer by at the end
+        
+        uint _currentPrice;
+        if (_asset){
+            _currentPrice = 10**36/uint(getThePrice()); //10**36 makes it current price IN DAI
+            //_currentPrice = _currentPrice * 10**18; //To put it at same magnitude as _strike
+        }
+        else {
+            _currentPrice = uint(getThePrice()); //CURRENT PRICE IN ETH
+        }
+        
+        //Calculate the Demand Multiplier
+        uint DM = calculateDemandMultiplier(_asset, _amount, _action);
+        numberToDivideBy = numberToDivideBy * 10 ** 3;
+        
+        //Calculate Theta Multiplier
+        //TODO: contractCreationPeriod in below function should be replaces with expiration-periodStart it'll work when all expirations happen on the same day, but needs to be updated.
+        // when ability to change expiration is made
+        uint theta = (10**3) * (contractCreationPeriod - ((block.number - periodStart) ** 2)/contractCreationPeriod)/contractCreationPeriod; 
+        numberToDivideBy = numberToDivideBy * 10 ** 3;
+        
+        //Calculate Vega
+        uint vega = _ATR; // should be in terms of how much _asset moves in the other asset price, IE for an ETH option, how much does ETH move in DAI
+        numberToDivideBy = numberToDivideBy * 10 ** 18;
+        
+        //Calculate Total premium and delta
+        uint totalPremium;
+        uint delta;
+        if (_currentPrice > _strike){
+            uint priceDifference = (_currentPrice - _strike);
+            totalPremium = _amount * ( (priceDifference + vega) * DM * theta );
+        }
+        else{ //This can't handle ATR being 132 but above if statement can?
+            delta = (10**3) * _currentPrice/_strike; // 10**18 is used to preserver decimals
+            totalPremium = _amount * ( vega * DM * theta * delta);
+            numberToDivideBy = numberToDivideBy * 10 ** 3;
+        } //TODO LOOK HERE TO START :)))))))))))
+        
+        
+        totalPremium = totalPremium/numberToDivideBy;
+        theta_test = theta;
+        delta_test = delta;
+        totalPremium_test = totalPremium;
+        DM_test = DM;
+        return totalPremium;
+        
     }
     
-    //function calculatePremium identical to the one above but this one is called by the contract and uses on chain resources
-    function calculatePremium ( uint _expiration, uint _amount, uint _strike, bool _asset, uint _ATR ) internal returns(uint){
-        //returns the amount of the underlying it is worth
-        //Oracle to grab price!
-        // intrinsic = (assetPrice - strikePrice)
-        // if ( assetPrice > strikePrice) { premium = (assetPrice - strikePrice) + demandMultiplier * ( ATR * assetPrice/strikePrice * (0.05 ** (1/BLOCKS_TO_EXPIRATION))
-        // else {premium = demandMultiplier * ( ATR * assetPrice/strikePrice * (0.05 ** (1/BLOCKS_TO_EXPIRATION))}
-        //return premium
+    function calculateDemandMultiplier(bool _asset, uint _amount, bool _action) public view returns(uint) {
+        uint DM;
+        uint newLockedA;
+        uint newLockedB;
+        if(_action){
+            newLockedA = lockedA + _amount;
+            newLockedB = lockedB + _amount;
+        }
+        else {
+            newLockedA = lockedA - _amount;
+            newLockedB = lockedB - _amount;
+        }
+        if(_asset) { //DM for ETH option
+            require(newLockedA <= totalA, "Not enough liquiidity in pool");
+            require(newLockedA >= 0, "Not enough liquiidity in pool");
+            if (newLockedA == totalA) {DM = 1000000000000000000*10**3;}
+            else{
+                DM = 10**3*newLockedA/(totalA - newLockedA) + 1*10**3;
+            }
+        }
+        else { //DM for DAI option
+            require(newLockedB <= totalB, "Not enough liquiidity in pool");
+            require(newLockedB >= 0, "Not enough liquiidity in pool");
+            if (newLockedB == totalB) {DM = 1000000000000000000*10**3;}
+            else {
+                DM = 10**3*newLockedB/(totalB - newLockedB) + 1*10**3;
+            }
+        }
+        
+        return DM;
     }
-    
-    //function to mint erc721 tokens to represent option contract ownership
-    //Strike should be in terms of the asset the premium is paid in.
-    // Could also have the function determine the amount the option is for based off how much funds were sent to cover the premium
-    // Initially expiration will always be the monthly expiration block
-    function mintOption( uint _expiration, uint _amount, uint _strike, uint _slippage, bool _asset ) public updateBlockPeriod {
+    function mintOption( uint _amount, uint _strike, bool _asset, uint _maxPremium, address payable _address ) payable public updateBlockPeriod {
+        require( msg.sender == _address, "Cannot mint options for a different address");
+        uint _expiration = periodStart + contractCreationPeriod;
         require(block.number < (periodStart + contractCreationPeriod), "Cannot create contracts during the withdrawal period!");
-        require(_amount > 1 * 10 ** 16, "option contract too small");
+        require(_amount >= 1 * 10 ** 16, "option contract too small"); //MAKE SURE I CREATE A LARGE ENOUGH OPTION
         uint i = 0;
         while ( maxOptionLedgerSize > i && optionLedger[indexToTokenId[i]].expiration > block.number ){ // Checks to find the earliest index where a contract is expired and it can right over it
             i++;
         }
         require( i < (maxOptionLedgerSize-1), "Max option contracts exist" );
+        
         //calculate premium
-        //requires for them to send money
+        uint _ATR = 132217900000000000000;//get from oracle
+
+        bool lockingFunds = true;
+        uint premium = calculatePremium( _amount, _strike, _asset, _ATR, lockingFunds);
+        if (_asset){
+            require(premium <= _maxPremium, "Slippage requirement not met");
+            require(DAI.transferFrom(msg.sender, address(this), premium), 'transferFrom failed.');
+            totalB = totalB + premium;
+            lockedA = lockedA + _amount;
+        }
+        else {
+            require(premium <= _maxPremium, "Slippage requirement not met");
+            require(msg.value >= premium, 'Not enough ETH sent');
+            totalA = totalA + premium;
+            lockedB = lockedB + _amount;
+        
+            // refund caller extra ETH they sent
+            _address.transfer(msg.value - premium);
+        }
         
         uint token_Id = uint(keccak256(abi.encodePacked(_expiration, _amount, _strike, msg.sender, block.number)));
         OPTIONFACTORY.createOption(msg.sender, token_Id);
@@ -211,21 +298,46 @@ contract optionLiquidityPool is Ownable {
         );
     }
     
+    function exerciseOption( uint token_Id, address payable _address ) public payable {
+        require( msg.sender == _address, "You can only exercise contracts you own");
+        require( OPTIONFACTORY.ownerOf(token_Id) == msg.sender, "Caller does not own contract");
+        require( optionLedger[token_Id].expiration < block.number, "Contract is expired");
+        //require to check if option is ITM
+        OPTIONFACTORY.burnOption(token_Id);
+        uint payment = (optionLedger[token_Id].strike * optionLedger[token_Id].amount) / 10**18;
+        if (optionLedger[token_Id].asset) {
+            //Its an ETH option so have them transfer the required DAI
+            require(DAI.transferFrom(msg.sender, address(this), payment), 'transferFrom failed.');
+             _address.transfer(optionLedger[token_Id].amount);
+             totalB = totalB + payment;
+             totalA = totalA - optionLedger[token_Id].amount;
+             lockedA = lockedA - optionLedger[token_Id].amount;
+        }
+        else {
+            //Its a DAI option so have them send ETH
+            require(msg.value == payment, 'Not enough ETH sent');
+            DAI.transferFrom(address(this), _address, optionLedger[token_Id].amount);
+            totalA = totalA + payment;
+            totalB = totalB - optionLedger[token_Id].amount;
+            lockedB = lockedB - optionLedger[token_Id].amount;
+        }
+    }
+    
+    function sellOption() public {}
+    
     function setOptionLedgerMaxSize( uint64 _size ) external onlyOwner {
         require( _size < 4294967294, "Provided size is too large!" );
         maxOptionLedgerSize = _size;
     }
+    //FOR DEVELOPMENT ONLY
+    function withdrawAll(address payable _address) payable external onlyOwner {
+        _address.transfer(address(this).balance);
+        DAI.transferFrom(address(this), _address, totalB);
+    }
     
-    
-    //function to calculate the demand multiplier but it only reads chain data and uses local resources
-    
-    //function identical to the one above but is used for onchain computation
-    
+    //TODO: 
     //functions to manage the optionBlocks, I think this would be called by an oracle, like a heart beat oracle
-    
     //function to grab ATR from aggregator oracles
-    
-    //function to accept ERC721s, reads the data from them, then burns the token, then pays out msg.sender as long as they sent the required funds
     
 }
 
@@ -246,5 +358,9 @@ contract optionFactory is ERC721, Ownable {
     constructor(string memory _name, string memory _symbol) ERC721(_name, _symbol) {}
     function createOption( address _to, uint _nonce) public onlyOwner {
         _safeMint(_to, _nonce);
+    }
+    
+    function burnOption(uint _tokenId) public onlyOwner {
+        _burn(_tokenId);
     }
 }
