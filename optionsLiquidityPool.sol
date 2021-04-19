@@ -211,7 +211,7 @@ contract optionLiquidityPool is Ownable {
         uint delta;
         if (_currentPrice > _strike){
             uint priceDifference = (_currentPrice - _strike);
-            totalPremium = _amount * ( (priceDifference + vega) * DM * theta );//TODO priceDifference needs to be seperated by the extrinsic Multipliers,else you can have an ITM option with a very low premium
+            totalPremium = _amount * ( priceDifference + vega * DM * theta );
         }
         else{ //This can't handle ATR being 132 but above if statement can?
             delta = (10**3) * _currentPrice/_strike; // 10**18 is used to preserver decimals
